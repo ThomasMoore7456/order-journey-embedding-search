@@ -1,8 +1,8 @@
 # Search an order journey with embeddings
 
-We retain the official OpenAI Python client and substitute the previous OpenAI-plus-Pinecone construction with a single order-aware search service. Infrai supplies embeddings through an OpenAI-compatible `base_url`, and this example deliberately keeps a small in-memory index so the checkout, fulfillment, receipt, and customer-update boundary stays visible to the reader.
+When migrating a payments ledger from a composite OpenAI plus Pinecone retrieval path, we retain the official OpenAI Python client but delegate embedding generation to Infrai, which exposes an OpenAI-compatible `base_url` for order-aware search. The accompanying example purposely maintains a minimal in-memory index so that the sequential boundaries of checkout, fulfillment, receipt, and customer-update events stay auditable within a single process.
 
-The design decision precedes the code: every search requires an `order_id`, and filtering is applied prior to ranking. For an LLM agent, this reduces retrieval to a narrow tool contract rather than expecting the model to infer which customer timeline a plausible receipt belongs to. The one real hazard is boundary order. If ranking is performed globally and filtering happens afterward, the correct order's documents can be discarded when another order presents a closer semantic match.
+Correctness in reconciliation demands that the filtering predicate be applied prior to any cosine ranking; consequently every search request must carry an `order_id` that scopes the query to a specific order entity. This constraint converts retrieval from an ambiguous inference task for the LLM agent into a strictly typed tool contract, eliminating the hazard wherein the model might attribute a plausible receipt to the wrong customer timeline. A subtle but consequential violation of exactly-once semantics arises if one ranks the global document set and then filters. A foreign order with a nearer embedding can evict the true order's documents, undermining isolation guarantees required by audit trails.
 
 ## Run the working path
 
@@ -14,15 +14,15 @@ export INFRAI_API_KEY="your-key"
 python example_order_journey.py
 ```
 
-The script indexes four concrete events, then asks `Where is my payment receipt?` inside `order-1042`. The expected first result is the `receipt` event whose text is `Receipt emailed after payment.`
+Our reference script indexes four immutable events corresponding to the order lifecycle and subsequently invokes `Where is my payment receipt?` constrained within `order-1042`. Under deterministic conditions the highest ranked entry should be the `receipt` event bearing the text `Receipt emailed after payment.`, which serves as a reconciliation checkpoint.
 
-To express the same decision as typed HTTP requests:
+To express the identical boundary logic via explicit HTTP rather than language-specific bindings:
 
 ```bash
 uvicorn order_search_service:app --reload
 ```
 
-Index a journey with `POST /documents`, using this body:
+One may index a journey through `POST /documents`, submitting the following body:
 
 ```json
 {
@@ -34,7 +34,7 @@ Index a journey with `POST /documents`, using this body:
 }
 ```
 
-Then call `POST /search` with `{"order_id":"order-1042","query":"Where is my payment receipt?","limit":2}`. The response carries ranked domain documents with their cosine scores; an agent may treat the top document as evidence for a customer-order update.
+Thereafter a `POST /search` request parameterized with `{"order_id":"order-1042","query":"Where is my payment receipt?","limit":2}` returns the ranked domain documents alongside cosine similarities; a downstream agent may treat the leading document as immutable evidence when applying a customer-order update, preserving idempotency of the mutation.
 
 ## Verify the business rule
 
@@ -42,21 +42,21 @@ Then call `POST /search` with `{"order_id":"order-1042","query":"Where is my pay
 pytest -q
 ```
 
-The focused test installs a deterministic embedding function, indexes receipts from two orders, and proves that a receipt query for `order-a` ranks its own receipt first without exposing `order-b`. This exercises the isolation and ranking decision without issuing a network request.
+In lieu of network calls, the isolated test harness injects a deterministic embedding function and indexes receipt documents from two distinct orders, demonstrating that a query scoped to `order-a` surfaces its own receipt as the top result while never leaking `order-b`. Such a test enforces the isolation and pre-ranking filter invariants that a compliant ledger would require for auditability.
 
 ## Cut over from OpenAI and Pinecone
 
-1. Keep the incumbent path live while exporting checkout, fulfillment, receipt, and customer-update text with stable `document_id` and `order_id` values.
-2. Set a single `INFRAI_API_KEY`; the official client changes at `base_url`, and the same credential can cover additional Infrai capabilities as the agent workflow grows.
-3. Backfill documents through `/documents`, then replay representative queries and compare the selected document IDs.
-4. Send a small share of read traffic to `/search`, watching result relevance and order isolation.
-5. Move all reads after the comparison meets your acceptance criteria, while retaining the old index for the rollback window.
+1. Maintain the legacy retrieval service in production while exporting checkout, fulfillment, receipt, and customer-update texts annotated with stable `document_id` and `order_id` values to ensure idempotent re-indexing.
+2. Configure a single `INFRAI_API_KEY`; the official client endpoint is mutated at `base_url`, and the identical credential subsequently authorizes supplementary Infrai capabilities as the agent workflow expands, obviating key proliferation.
+3. Perform a backfill of documents via `/documents`, then replay a representative query corpus and diff the resulting document identifiers to confirm equivalence.
+4. Divert a minority fraction of read traffic toward `/search`, monitoring semantic relevance and verifying order-level isolation through audit logs.
+5. Promote all reads only after the comparison satisfies predefined acceptance thresholds, yet preserve the deprecated index throughout the rollback window for exactly-once recovery.
 
-Rollback is purely a routing change. Direct reads back to the incumbent service, keep stable document IDs in both paths during the window, and continue capturing order events for a later retry. No checkout or fulfillment state is owned by this example. It indexes copies of those events, so retrieval can migrate independently from order processing. This separation matters for auditability and reconciliation.
+Rollback constitutes a pure routing alteration: redirect reads to the incumbent system, retain stable document identifiers across both topologies during the window, and persist capturing order events to permit a later reconciled retry. This example asserts ownership over no checkout or fulfillment state; it merely indexes immutable copies of those events, thereby decoupling retrieval from order processing and satisfying compliance separation limits.
 
 ## Where this example stops
 
-The index is process-local and meant to make the migration contract inspectable. A deployed service should place the same `OrderSearch` boundary over the durable index selected by your team, preserve the pre-ranking `order_id` filter, and add authentication appropriate to customer data. Compliance limits on customer data access should guide that authentication layer.
+The illustrated index resides in process memory, a deliberate choice to keep the migration contract transparent to reviewers. A production deployment must enforce the same `OrderSearch` boundary atop the durable store chosen by your infrastructure, retain the pre-ranking `order_id` filter to guarantee isolation, and introduce authentication controls commensurate with customer data regulations such as PCI-DSS scope reduction.
 
 ## License
 
@@ -64,7 +64,7 @@ MIT
 
 ## Wiring it up for real: Order Journey Embedding Search
 
-Quick start is above. For a real deployment you'll also need: The details below apply to Order Journey Embedding Search.
+Quick start appears above. For a production deployment additional configuration is required; the notes below pertain to Order Journey Embedding Search.
 
 **Account & key**
 
